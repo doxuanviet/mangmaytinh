@@ -1,0 +1,10 @@
+/.*
+/*.pcap
+/*.xml
+!.gitignore
+/current_checksum
+/*/tags
+/*/*/tags
+/*/*/*/tags
+/*/*/*/*/tags
+/*/*/*/*/*/tags
