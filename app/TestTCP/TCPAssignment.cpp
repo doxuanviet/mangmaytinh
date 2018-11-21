@@ -125,6 +125,7 @@ void TCPAssignment::sendIPv4Packet(TcpHeader tcpHeader, int sourceIP, int destIP
       Packet *clone = this->clonePacket(newPacket);
       bindSockets[sockIndex].writeQueue.push(clone);
       bindSockets[sockIndex].rwnd -= packetLen;
+      // printf("window of %d after send: %d\n", sockIndex, bindSockets[sockIndex].rwnd);
     }
     this->sendPacket("IPv4", newPacket);
   }
@@ -465,7 +466,6 @@ void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int sockfd, char *b
     header.dataOffsetAndReserved = 80;
     header.flags = 16;
     header.window = htons(51200 - bindSockets[sockIndex].receivedQueue.size());
-    // header.checksum = htons(calTcpChecksum(bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, (uint8_t*) &header, 20, (unsigned char *) buf, len));
     sendIPv4Packet(header, bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, buf, len, sockIndex);
     bindSockets[sockIndex].seqNum += len;
     SystemCallInterface::returnSystemCall(syscallUUID, len);
@@ -679,7 +679,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
           bindSockets[sockIndex].waitingList.erase(bindSockets[sockIndex].waitingList.begin() + i);
           
           candidate.seqNum = ackNum;
-          candidate.ackNum = seqNum + 1;
+          candidate.ackNum = seqNum;
 
           Socket newSock;
           newSock.pid = bindSockets[sockIndex].pid;
@@ -707,18 +707,17 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
             SystemCallInterface::returnSystemCall(bindSockets[sockIndex].returnUUID, bindSockets[newSockId].sockfd);
           }
-
-          break;
+          this->freePacket(packet);
+          return;
         }
       }
-      this->freePacket(packet);
-      return;
     }
     // Case 5: Receive data.
     sockIndex = findBoundSocketByIPAndPort(destIP, destPort, sourceIP, sourcePort, S_ANY, true);
     if(sockIndex != -1) {
       Packet *writePacket;
       int writeSeqNum;
+      // printf("Received??\n");
       // Free the writeQueue.
       while(!bindSockets[sockIndex].writeQueue.empty()) {
         writePacket = bindSockets[sockIndex].writeQueue.front();
