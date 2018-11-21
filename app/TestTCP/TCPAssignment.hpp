@@ -63,12 +63,20 @@ struct Socket{
 
   // Their receive window
   int rwnd = 51200;
+  Time estimatedRTT = TimeUtil::makeTime(1000, TimeUtil::USEC);
+  Time devRTT = TimeUtil::makeTime(20, TimeUtil::USEC);
+  Time packetSentTime;
 
   UUID returnUUID;
+  UUID resendUUID;
   int readLength;
   char *readBuf;
   int writeLength;
   char *writeBuf;
+
+  // 3 duplicate ACKs.
+  int lastAck = -1;
+  int lastAckCount = 0;
 
   socketState state = S_BOUND;
   

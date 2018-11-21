@@ -102,9 +102,9 @@ unsigned short calTcpChecksum(int sourceIP, int destIP, uint8_t* buf, unsigned s
 }
 
 void TCPAssignment::sendIPv4Packet(TcpHeader tcpHeader, int sourceIP, int destIP, char *buf = NULL, int len = 0, int sockIndex = -1){
-  int FIN = tcpHeader.flags & 1;
-  int SYN = (tcpHeader.flags >> 1) & 1;
-  int ACK = (tcpHeader.flags >> 4) & 1;
+  // int FIN = tcpHeader.flags & 1;
+  // int SYN = (tcpHeader.flags >> 1) & 1;
+  // int ACK = (tcpHeader.flags >> 4) & 1;
   // printf("Send packet from %s to %s with flag (%d%d%d)\n", IPAsString(sourceIP).c_str(), IPAsString(destIP).c_str(), FIN, SYN, ACK);
   int seqNum = ntohl(tcpHeader.seqNum);
   bool firstTime = true;
@@ -120,13 +120,17 @@ void TCPAssignment::sendIPv4Packet(TcpHeader tcpHeader, int sourceIP, int destIP
     newPacket->writeData(26, &sourceIP, 4);
     newPacket->writeData(30, &destIP, 4);
     newPacket->writeData(34, &header, 20);
-    newPacket->writeData(54, buf + i, packetLen);
-    if(sockIndex != -1) {
-      Packet *clone = this->clonePacket(newPacket);
-      bindSockets[sockIndex].writeQueue.push(clone);
-      bindSockets[sockIndex].rwnd -= packetLen;
-      // printf("window of %d after send: %d\n", sockIndex, bindSockets[sockIndex].rwnd);
+    if(buf != NULL) newPacket->writeData(54, buf + i, packetLen);
+
+    Packet *clone = this->clonePacket(newPacket);
+    if(sockIndex == -1) printf("Invalid socketIndex\n");
+    if(bindSockets[sockIndex].writeQueue.empty()) {
+      bindSockets[sockIndex].packetSentTime = this->getHost()->getSystem()->getCurrentTime();
+      Time TOI = bindSockets[sockIndex].packetSentTime + bindSockets[sockIndex].estimatedRTT + 4*bindSockets[sockIndex].devRTT;
+      bindSockets[sockIndex].resendUUID = addTimer(&bindSockets[sockIndex], TOI);
     }
+    bindSockets[sockIndex].writeQueue.push(clone);
+    bindSockets[sockIndex].rwnd -= packetLen;
     this->sendPacket("IPv4", newPacket);
   }
 }
@@ -185,12 +189,12 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int sockfd)
       header.sourcePort = bindSockets[sockIndex].sourcePort;
       header.destPort = bindSockets[sockIndex].destPort;
       header.seqNum = htonl(bindSockets[sockIndex].seqNum);
-      header.ackNum = htonl(0);
+      header.ackNum = htonl(bindSockets[sockIndex].ackNum);
       header.dataOffsetAndReserved = 80;
       header.flags = 1;
-      header.window = htons(51200);
+      header.window = htons(51200 - bindSockets[sockIndex].receivedQueue.size());
       header.checksum = htons(calTcpChecksum(bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, (uint8_t*) &header, 20));
-      sendIPv4Packet(header, bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP);
+      sendIPv4Packet(header, bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, NULL, 0, sockIndex);
   	}
     else if(bindSockets[sockIndex].state == S_CLOSE_WAIT){
       bindSockets[sockIndex].state = S_LAST_ACK;
@@ -200,12 +204,12 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int sockfd)
       header.sourcePort = bindSockets[sockIndex].sourcePort;
       header.destPort = bindSockets[sockIndex].destPort;
       header.seqNum = htonl(bindSockets[sockIndex].seqNum);
-      header.ackNum = htonl(bindSockets[sockIndex].seqNum + 1);
+      header.ackNum = htonl(bindSockets[sockIndex].ackNum);
       header.dataOffsetAndReserved = 80;
       header.flags = 1;
-      header.window = htons(51200);
+      header.window = htons(51200 - bindSockets[sockIndex].receivedQueue.size());
       header.checksum = htons(calTcpChecksum(bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, (uint8_t*) &header, 20));
-      sendIPv4Packet(header, bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP);
+      sendIPv4Packet(header, bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, NULL, 0, sockIndex);
     }
     else if(bindSockets[sockIndex].state == S_BOUND || bindSockets[sockIndex].state == S_LISTEN) {
       sockaddr addr = bindMap.find(ii(pid, sockfd))->second;
@@ -374,7 +378,7 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int sockfd, struc
 	synHeader.window = htons(51200);
   synHeader.checksum = htons(calTcpChecksum(clientIP, serverIP, (uint8_t*) &synHeader, 20));
 
-  sendIPv4Packet(synHeader, clientIP, serverIP);
+  sendIPv4Packet(synHeader, clientIP, serverIP, NULL, 0, sockIndex);
 }
 
 void TCPAssignment::syscall_accept(UUID syscallUUID, int pid, int sockfd, struct sockaddr* addr, socklen_t *addrLen)
@@ -551,7 +555,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
   int checksum = htons(calTcpChecksum(sourceIP, destIP, data, packet->getSize() - 34));
   if(checksum != 0) {
-    printf("Checksum error.\n");
+    this->freePacket(packet);
     return;
   }
 
@@ -585,7 +589,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
         header.window = htons(51200);
         header.checksum = htons(calTcpChecksum(destIP, sourceIP, (uint8_t*) &header, 20));
 
-        sendIPv4Packet(header, destIP, sourceIP);
+        sendIPv4Packet(header, destIP, sourceIP, NULL, 0, sockIndex);
       }
     }
     this->freePacket(packet);
@@ -610,7 +614,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
         header.window = htons(51200);
         header.checksum = htons(calTcpChecksum(destIP, sourceIP, (uint8_t*) &header, 20));
 
-        sendIPv4Packet(header, destIP, sourceIP);
+        sendIPv4Packet(header, destIP, sourceIP, NULL, 0, sockIndex);
 
         // Establish connection
         bindSockets[sockIndex].state = S_ESTABLISHED;
@@ -645,10 +649,8 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
         bindSockets[sockIndex].state = S_TIME_WAIT;
 
           Time currentTime = this->getHost()->getSystem()->getCurrentTime();
-          Time waitTime = TimeUtil::makeTime(5, TimeUtil::SEC);
-          int *savedIndex = (int*) malloc(4);
-          *savedIndex = sockIndex;
-          addTimer(savedIndex, currentTime + waitTime);
+          Time waitTime = 2 * bindSockets[sockIndex].estimatedRTT;
+          addTimer(&bindSockets[sockIndex], currentTime + waitTime);
       }
       this->freePacket(packet);
       return;
@@ -717,8 +719,8 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
     if(sockIndex != -1) {
       Packet *writePacket;
       int writeSeqNum;
-      // printf("Received??\n");
       // Free the writeQueue.
+      bool hasPop = false;
       while(!bindSockets[sockIndex].writeQueue.empty()) {
         writePacket = bindSockets[sockIndex].writeQueue.front();
         writePacket->readData(38, &writeSeqNum, 4);
@@ -726,9 +728,26 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
         if(writeSeqNum < ackNum) {
           bindSockets[sockIndex].rwnd += writePacket->getSize() - 54;
           this->freePacket(writePacket);
+          hasPop = true;
           bindSockets[sockIndex].writeQueue.pop();
         }
         else break;
+      }
+      if(hasPop) {
+        cancelTimer(bindSockets[sockIndex].resendUUID);
+        // TODO: Congestion control: update RTT
+        Time sampleRTT = this->getHost()->getSystem()->getCurrentTime() - bindSockets[sockIndex].packetSentTime;
+        bindSockets[sockIndex].estimatedRTT = 0.875*bindSockets[sockIndex].estimatedRTT + 0.125*sampleRTT;
+        bindSockets[sockIndex].devRTT = 0.75*bindSockets[sockIndex].devRTT + 
+          (sampleRTT < bindSockets[sockIndex].estimatedRTT 
+            ? bindSockets[sockIndex].estimatedRTT - sampleRTT
+            : sampleRTT - bindSockets[sockIndex].estimatedRTT);
+
+        if(!bindSockets[sockIndex].writeQueue.empty()) {
+          bindSockets[sockIndex].packetSentTime = this->getHost()->getSystem()->getCurrentTime();
+          Time TOI = bindSockets[sockIndex].packetSentTime + bindSockets[sockIndex].estimatedRTT + 4*bindSockets[sockIndex].devRTT;
+          bindSockets[sockIndex].resendUUID = addTimer(&bindSockets[sockIndex], TOI);
+        }
       }
       // Read data.
       if(bindSockets[sockIndex].receivedQueue.size() + packet->getSize() - 54 <= 51200 && packet->getSize() > 54) {
@@ -750,8 +769,25 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
         header.flags = 16;
         header.window = htons(51200 - bindSockets[sockIndex].receivedQueue.size());
         // header.checksum = htons(calTcpChecksum(bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, (uint8_t*) &header, 20));
-        sendIPv4Packet(header, bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP);
+        sendIPv4Packet(header, bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, NULL, 0, sockIndex);
       }
+      if(packet->getSize() == 54) {
+        // 3 Duplicate ACKs.
+        if(ackNum == bindSockets[sockIndex].lastAck) bindSockets[sockIndex].lastAckCount++;
+        else {
+          bindSockets[sockIndex].lastAck = ackNum;
+          bindSockets[sockIndex].lastAckCount = 1;
+        }
+        if(bindSockets[sockIndex].lastAckCount >= 3) {
+          bindSockets[sockIndex].lastAckCount = 0;
+          if(!bindSockets[sockIndex].writeQueue.empty()) {
+            Packet *packet = bindSockets[sockIndex].writeQueue.front();
+            Packet *clone = this->clonePacket(packet);
+            this->sendPacket("IPv4", clone);
+          }
+        }
+      }
+
       // Unblock write() if possible.
       if(bindSockets[sockIndex].isWaitingWrite && bindSockets[sockIndex].writeLength <= bindSockets[sockIndex].rwnd) {
         bindSockets[sockIndex].isWaitingWrite = false;
@@ -807,7 +843,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
       header.window = htons(51200);
       header.checksum = htons(calTcpChecksum(bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, (uint8_t*) &header, 20));
 
-      sendIPv4Packet(header, bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP);
+      sendIPv4Packet(header, bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, NULL, 0, sockIndex);
       this->freePacket(packet);
       return;
     }
@@ -827,7 +863,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
       header.window = htons(10000);
       header.checksum = htons(calTcpChecksum(bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, (uint8_t*) &header, 20));
 
-      sendIPv4Packet(header, bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP);
+      sendIPv4Packet(header, bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, NULL, 0, sockIndex);
       this->freePacket(packet);
       return;
     }
@@ -847,13 +883,11 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
       header.window = htons(51200);
       header.checksum = htons(calTcpChecksum(bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, (uint8_t*) &header, 20));
 
-      sendIPv4Packet(header, bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP);
+      sendIPv4Packet(header, bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, NULL, 0, sockIndex);
 
       Time currentTime = this->getHost()->getSystem()->getCurrentTime();
-      Time waitTime = TimeUtil::makeTime(5, TimeUtil::SEC);
-      int *savedIndex = (int*) malloc(4);
-      *savedIndex = sockIndex;
-      addTimer(savedIndex, currentTime + waitTime);
+      Time waitTime = 2 * bindSockets[sockIndex].estimatedRTT;
+      addTimer(&bindSockets[sockIndex], currentTime + waitTime);
       this->freePacket(packet);
       return;
     }
@@ -871,7 +905,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
       header.window = htons(51200);
       header.checksum = htons(calTcpChecksum(bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, (uint8_t*) &header, 20));
 
-      sendIPv4Packet(header, bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP);
+      sendIPv4Packet(header, bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, NULL, 0, sockIndex);
     }
     this->freePacket(packet);
     return;
@@ -893,13 +927,12 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
       header.window = htons(51200);
       header.checksum = htons(calTcpChecksum(bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, (uint8_t*) &header, 20));
 
-      sendIPv4Packet(header, bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP);
+      sendIPv4Packet(header, bindSockets[sockIndex].sourceIP, bindSockets[sockIndex].destIP, NULL, 0, sockIndex);
 
       Time currentTime = this->getHost()->getSystem()->getCurrentTime();
-      Time waitTime = TimeUtil::makeTime(5, TimeUtil::SEC);
-      int *savedIndex = (int*) malloc(4);
-      *savedIndex = sockIndex;
-      addTimer(savedIndex, currentTime + waitTime);
+      Time waitTime = 2 * bindSockets[sockIndex].estimatedRTT;
+
+      addTimer(&bindSockets[sockIndex], currentTime + waitTime);
     }
     this->freePacket(packet);
     return;
@@ -909,15 +942,37 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 void TCPAssignment::timerCallback(void* payload)
 {
-  int sockIndex = *(int*) payload;
-  free(payload);
+  if(payload == NULL) return;
+  Socket *sock = (Socket *) payload;
+  int sockIndex = -1;
+  for(int i=0; i<bindSockets.size(); i++)
+    if(bindSockets[i].pid == sock->pid && bindSockets[i].sockfd == sock->sockfd) {
+      sockIndex = i;
+      break;
+    }
+  if(sockIndex == -1) return;
 
-  openSet.erase(ii(bindSockets[sockIndex].pid, bindSockets[sockIndex].sockfd));
-  bindMap.erase(ii(bindSockets[sockIndex].pid, bindSockets[sockIndex].sockfd));
-  SystemCallInterface::removeFileDescriptor(bindSockets[sockIndex].pid, bindSockets[sockIndex].sockfd);
-  UUID closeUUID = bindSockets[sockIndex].returnUUID;
-  bindSockets.erase(bindSockets.begin() + sockIndex);
-  SystemCallInterface::returnSystemCall(closeUUID, 0);
+  if(bindSockets[sockIndex].state == S_TIME_WAIT) {
+    openSet.erase(ii(bindSockets[sockIndex].pid, bindSockets[sockIndex].sockfd));
+    bindMap.erase(ii(bindSockets[sockIndex].pid, bindSockets[sockIndex].sockfd));
+    SystemCallInterface::removeFileDescriptor(bindSockets[sockIndex].pid, bindSockets[sockIndex].sockfd);
+    UUID closeUUID = bindSockets[sockIndex].returnUUID;
+    bindSockets.erase(bindSockets.begin() + sockIndex);
+    SystemCallInterface::returnSystemCall(closeUUID, 0);
+  }
+  else { // Resend everything in writeQueue.
+    int len = bindSockets[sockIndex].writeQueue.size();
+    for(int i=0; i<len; i++) {
+      Packet* packet = bindSockets[sockIndex].writeQueue.front();
+      bindSockets[sockIndex].writeQueue.pop();
+      bindSockets[sockIndex].writeQueue.push(packet);
+      Packet *newPacket = this->clonePacket(packet);
+      this->sendPacket("IPv4", newPacket);
+    }
+    bindSockets[sockIndex].packetSentTime = this->getHost()->getSystem()->getCurrentTime();
+    Time TOI = bindSockets[sockIndex].packetSentTime + bindSockets[sockIndex].estimatedRTT + 4*bindSockets[sockIndex].devRTT;
+    bindSockets[sockIndex].resendUUID = addTimer(&bindSockets[sockIndex], TOI);
+  }
 }
 
 

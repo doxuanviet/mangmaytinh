@@ -53,7 +53,7 @@ test_part3: test_part2
 
 test_part3_debug: all
 	@echo "Running test cases for project3..."
-	@-build/testTCP --gtest_filter="TestEnv_Any.TestTransfer_Accept_Send_Symmetric" --gtest_output=xml:part2.xml
+	@-build/testTCP --gtest_filter="TestEnv_Any.TestTransfer_Connect_Send_Symmetric" --gtest_output=xml:part2.xml
 
 test_part4: test_part3
 	@echo "Running test cases for project4..."
